@@ -3,23 +3,42 @@
 # Get your free API key at: https://financialmodelingprep.com/developer
 fmp_api_key = YOUR_FMP_API_KEY
 
-# OpenAI API Key (or compatible API provider)
+# ===========================================================================
+# LLM backend
+#
+# Pick ONE of the two blocks below. Both work out of the box; FinRobot detects
+# the backend from openai_base_url and applies the matching request parameters
+# on its own:
+#
+#   OpenAI   original parameters, unchanged (1000-token budget, no reasoning
+#            parameter) -- leave block A active.
+#   DeepSeek hidden reasoning is billed against max_tokens there and can consume
+#            the whole budget, so FinRobot skips reasoning and raises the budget
+#            to 16000 automatically -- activate block B instead.
+#
+# Do not leave both blocks active: only one openai_api_key may be set.
+# ===========================================================================
+
+# --- A) OpenAI (default) ---------------------------------------------------
 # Get your API key at: https://platform.openai.com/account/api-keys
 openai_api_key = YOUR_OPENAI_API_KEY
-
-# OpenAI Base URL (optional, change for proxy services like SiliconFlow)
-# Default: https://api.openai.com/v1
 openai_base_url = https://api.openai.com/v1
-
-# Model name (optional, change for proxy services)
-# Model name (optional, change for proxy services)
-# OpenAI Model (choose one of the following ):
-#   gpt-4.1       - Latest flagship model, best quality (recommended for production)
-#   gpt-4.1-mini  - Fast and cost-effective (recommended for development/testing)
-#   gpt-4o        - Previous generation flagship, stable and reliable
-#   gpt-4o-mini   - Previous generation lightweight model
-# Default: gpt-4.1-mini
+# gpt-4o-mini is the cheapest option for trying things out.
+#   gpt-4.1       - best quality      gpt-4.1-mini - fast + cheap
+#   gpt-4o        - previous flagship gpt-4o-mini  - previous lightweight
 openai_model = gpt-4.1
+
+# --- B) DeepSeek -----------------------------------------------------------
+# To use DeepSeek, comment out the three lines in block A above and uncomment
+# the three below. Get your key at: https://platform.deepseek.com
+# openai_api_key = YOUR_DEEPSEEK_API_KEY
+# openai_base_url = https://api.deepseek.com
+# openai_model = deepseek-chat
+
+# Optional override, leave EMPTY to use the per-backend default shown above.
+# Set it only to force a value, e.g. "high" if you want a DeepSeek model to
+# reason despite the slower and more expensive output.
+openai_reasoning_effort =
 
 # Adanos Finance API key (optional, enables retail sentiment insights in equity reports)
 adanos_api_key = YOUR_ADANOS_API_KEY

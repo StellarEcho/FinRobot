@@ -8,15 +8,45 @@ from openai import OpenAI
 from modules.retail_sentiment_client import format_retail_sentiment_for_prompt
 
 
-# Output-token budget handed to the chat-completions endpoint.
-# Reasoning models count their hidden reasoning against this same budget, so it
-# needs headroom well beyond the visible answer. 1000 used to be enough for
-# non-reasoning models but is fully consumed by reasoning on e.g. DeepSeek,
-# which then returns an empty message with finish_reason="length".
-DEFAULT_MAX_TOKENS = 16000
-# Upper bound for the automatic retry that kicks in when reasoning eats the
-# whole budget before any answer text is produced.
-MAX_TOKEN_CEILING = 32000
+# ---------------------------------------------------------------------------
+# Provider profiles
+#
+# FinRobot talks to any OpenAI-compatible chat-completions endpoint. Two
+# families need different request parameters, so we resolve them from the
+# configured endpoint instead of making every user remember which switches to
+# flip. reasoning_effort can still be overridden per call or through
+# openai_reasoning_effort in config.ini.
+#
+#   deepseek    Reasoning models bill hidden reasoning against max_tokens, so a
+#               long chain of thought can consume the whole budget and return an
+#               empty answer. Skip reasoning by default (~20x fewer output
+#               tokens, ~20x faster) and allow a much larger budget.
+#   openai      Behave exactly like the original code: original 1000-token
+#               budget, temperature 0.7, and no reasoning_effort parameter.
+#   compatible  Other OpenAI-compatible proxies (SiliconFlow, ...). Same as
+#               openai, since the original defaults are the safe common subset.
+# ---------------------------------------------------------------------------
+PROVIDER_PROFILES = {
+    "deepseek": {"max_tokens": 16000, "retry_ceiling": 32000, "reasoning_effort": "none"},
+    "openai": {"max_tokens": 1000, "retry_ceiling": 4096, "reasoning_effort": None},
+    "compatible": {"max_tokens": 1000, "retry_ceiling": 4096, "reasoning_effort": None},
+}
+DEFAULT_PROVIDER = "openai"
+DEFAULT_MODEL = "gpt-4o-mini"
+
+
+def resolve_provider(base_url: str = None) -> str:
+    """Infers the provider from the configured endpoint.
+
+    An empty base_url means the OpenAI SDK default endpoint, so it counts as
+    OpenAI and gets the original request parameters.
+    """
+    endpoint = (base_url or "").strip().lower()
+    if not endpoint or "api.openai.com" in endpoint:
+        return "openai"
+    if "deepseek" in endpoint:
+        return "deepseek"
+    return "compatible"
 
 
 def _get_fallback_text(prompt_type: str, company_name: str) -> str:
@@ -105,8 +135,10 @@ def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_na
         base_url: Optional API base URL (for proxy services like SiliconFlow)
         model: Optional model name (default: gpt-4o-mini or configured model)
         reasoning_effort: Optional reasoning budget hint ("none"/"low"/...).
-            Only sent when set, because most providers reject unknown values.
-        max_tokens: Optional output-token budget (default: DEFAULT_MAX_TOKENS)
+            When omitted, the provider profile decides: DeepSeek skips
+            reasoning, OpenAI never sends the parameter at all.
+        max_tokens: Optional output-token budget. Defaults to the provider
+            profile (DeepSeek 16000, OpenAI 1000).
     """
     
     print(f"🤖 Generating '{prompt_type}' text section...")
@@ -116,10 +148,18 @@ def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_na
         print(f"⚠️ Warning: No API key provided. Using fallback text for '{prompt_type}'.")
         return _get_fallback_text(prompt_type, company_name)
     
+    # Which parameters are safe to send depends on the endpoint, so resolve the
+    # provider profile before building the request.
+    provider = resolve_provider(base_url)
+    profile = PROVIDER_PROFILES[provider]
+    effective_reasoning_effort = reasoning_effort or profile["reasoning_effort"]
+
     # Determine model to use
-    default_model = "gpt-4o-mini"
-    if model:
-        default_model = model
+    default_model = model or DEFAULT_MODEL
+    if provider == "deepseek" and not model:
+        print(f"⚠️ Warning: no model configured for the DeepSeek endpoint, falling "
+              f"back to '{DEFAULT_MODEL}' which DeepSeek does not serve. Set "
+              f"openai_model in config.ini (e.g. deepseek-chat).")
     
     # Create OpenAI client
     try:
@@ -129,7 +169,7 @@ def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_na
             print(f"📡 Using API base URL: {base_url}")
         
         client = OpenAI(**client_kwargs)
-        print(f"🤖 Using model: {default_model}")
+        print(f"🤖 Using model: {default_model} [{provider} profile]")
     except Exception as e:
         print(f"⚠️ Warning: Could not create OpenAI client: {e}")
         return _get_fallback_text(prompt_type, company_name)
@@ -151,13 +191,16 @@ def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_na
             "temperature": 0.7,
             "max_tokens": token_budget
         }
-        # Only sent when configured: providers differ in which values they accept.
-        if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
+        # Explicit configuration wins; otherwise the provider profile decides.
+        # Sending DeepSeek-only values such as "none" to OpenAI would be
+        # rejected, so OpenAI's profile leaves this unset.
+        if effective_reasoning_effort:
+            kwargs["reasoning_effort"] = effective_reasoning_effort
         return client.chat.completions.create(**kwargs)
 
     try:
-        budget = max_tokens or DEFAULT_MAX_TOKENS
+        budget = max_tokens or profile["max_tokens"]
+        retry_ceiling = profile["retry_ceiling"]
         response = _request(budget)
         choice = response.choices[0]
         generated_text = (choice.message.content or "").strip()
@@ -165,8 +208,8 @@ def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_na
         # Reasoning models can spend the entire budget on hidden reasoning and
         # return no answer text at all. Retry once with a bigger budget rather
         # than silently degrading to the static fallback text.
-        if not generated_text and choice.finish_reason == "length" and budget < MAX_TOKEN_CEILING:
-            retry_budget = MAX_TOKEN_CEILING
+        if not generated_text and choice.finish_reason == "length" and budget < retry_ceiling:
+            retry_budget = retry_ceiling
             print(f"🔁 '{prompt_type}': no answer text (finish_reason=length, {budget}-token budget "
                   f"consumed by reasoning), retrying with {retry_budget}")
             response = _request(retry_budget)
