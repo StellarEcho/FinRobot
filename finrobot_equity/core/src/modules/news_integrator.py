@@ -455,10 +455,10 @@ def get_enhanced_company_news(ticker: str, api_key: str, days_back: int = 5,
         from_date = start_date.strftime('%Y-%m-%d')
         to_date = end_date.strftime('%Y-%m-%d')
         
-        # 获取新闻
-        url = "https://financialmodelingprep.com/api/v3/stock_news"
+        # 获取新闻（FMP 已于 2025-08-31 停用 /api/v3，改用 stable 接口）
+        url = "https://financialmodelingprep.com/stable/news/stock"
         params = {
-            'tickers': ticker,
+            'symbols': ticker,
             'from': from_date,
             'to': to_date,
             'limit': limit,
@@ -467,6 +467,18 @@ def get_enhanced_company_news(ticker: str, api_key: str, days_back: int = 5,
         
         logger.info(f"Fetching enhanced news for {ticker}...")
         response = requests.get(url, params=params)
+        if response.status_code in (401, 402, 403):
+            logger.warning(
+                f"News endpoint not included in the current FMP subscription "
+                f"(HTTP {response.status_code}); skipping news enrichment."
+            )
+            return {
+                'ticker': ticker,
+                'articles': [],
+                'summary': f"No recent news found for {ticker}.",
+                'categorized': {},
+                'sentiment_overview': {'positive': 0, 'negative': 0, 'neutral': 0}
+            }
         response.raise_for_status()
         raw_news = response.json()
         

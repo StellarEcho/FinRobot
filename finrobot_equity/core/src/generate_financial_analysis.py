@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import re
 import pandas as pd
 import json 
 
@@ -21,6 +22,36 @@ from modules.sensitivity_analyzer import SensitivityAnalyzer
 from modules.catalyst_analyzer import CatalystAnalyzer
 from modules.news_integrator import NewsIntegrator, get_enhanced_company_news
 from modules.retail_sentiment_client import RetailSentimentClient
+
+# Headings the major_takeaways section must cover.
+TAKEAWAY_SECTIONS = (
+    "Revenue Growth",
+    "Gross Profit Margin",
+    "SG&A Expense Margin",
+    "EBITDA Margin",
+)
+
+
+def _has_all_takeaway_sections(text: str) -> bool:
+    """Checks the four required takeaway headings are present.
+
+    Models format headings differently ("Revenue Growth:", "**Revenue Growth**",
+    "## Revenue Growth"), so strip markdown and compare case-insensitively
+    instead of requiring an exact "Label:" match.
+    """
+    if not text:
+        return False
+    normalised = re.sub(r"[*#`_]+", "", text).lower()
+    normalised = re.sub(r"[ \t]+", " ", normalised)
+    for section in TAKEAWAY_SECTIONS:
+        if section.lower() in normalised:
+            continue
+        # SG&A is frequently written without the ampersand.
+        if section == "SG&A Expense Margin" and "sga expense margin" in normalised:
+            continue
+        return False
+    return True
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate financial analysis data using FMP API instead of PDF extraction.")
@@ -103,6 +134,12 @@ def main():
                 print(f"Using model: {openai_model}")
             except:
                 openai_model = None  # model is optional
+            # Optional reasoning budget hint. Set to "none" on reasoning models
+            # (e.g. DeepSeek) to skip hidden reasoning tokens entirely; leave
+            # unset to keep the provider default.
+            openai_reasoning_effort = config.get("API_KEYS", "openai_reasoning_effort", fallback=None) or None
+            if openai_reasoning_effort:
+                print(f"Using reasoning effort: {openai_reasoning_effort}")
     except Exception as e:
         print(f"Error loading configuration: {e}")
         print("Please ensure config.ini exists with valid API keys:")
@@ -444,7 +481,8 @@ def main():
                         args.company_name, 
                         args.company_ticker,
                         base_url=openai_base_url,
-                        model=openai_model
+                        model=openai_model,
+                        reasoning_effort=openai_reasoning_effort
                     )
                     
                     # Fallback validation can remain here as a safety net
@@ -452,7 +490,7 @@ def main():
                          print(f"⚠️ Warning: Competitor analysis seems too short, using fallback.")
                          generated_text = f"{args.company_name} demonstrates competitive positioning within its industry sector through consistent financial performance and strategic market positioning relative to key competitors."
                     
-                    elif text_type == "major_takeaways" and "Revenue Growth:" not in generated_text:
+                    elif text_type == "major_takeaways" and not _has_all_takeaway_sections(generated_text):
                          print(f"⚠️ Warning: Major takeaways missing required sections, using fallback.")
                          generated_text = f"Revenue Growth: {args.company_name}'s revenue growth shows consistent performance trends.\n\nGross Profit Margin: {args.company_name}'s gross profit margins demonstrate operational effectiveness.\n\nSG&A Expense Margin: {args.company_name}'s SG&A expense management shows disciplined cost control.\n\nEBITDA Margin Stability: {args.company_name}'s EBITDA margin stability reflects strong underlying fundamentals."
 

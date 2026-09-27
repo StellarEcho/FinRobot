@@ -8,6 +8,17 @@ from openai import OpenAI
 from modules.retail_sentiment_client import format_retail_sentiment_for_prompt
 
 
+# Output-token budget handed to the chat-completions endpoint.
+# Reasoning models count their hidden reasoning against this same budget, so it
+# needs headroom well beyond the visible answer. 1000 used to be enough for
+# non-reasoning models but is fully consumed by reasoning on e.g. DeepSeek,
+# which then returns an empty message with finish_reason="length".
+DEFAULT_MAX_TOKENS = 16000
+# Upper bound for the automatic retry that kicks in when reasoning eats the
+# whole budget before any answer text is produced.
+MAX_TOKEN_CEILING = 32000
+
+
 def _get_fallback_text(prompt_type: str, company_name: str) -> str:
     """Returns fallback text when agent generation fails."""
     fallbacks = {
@@ -79,7 +90,9 @@ def _prepare_user_prompt(data: Dict, prompt_type: str, company_name: str, compan
     return prompt
 
 
-def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_name: str, company_ticker: str, base_url: str = None, model: str = None) -> str:
+def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_name: str, company_ticker: str,
+                          base_url: str = None, model: str = None,
+                          reasoning_effort: str = None, max_tokens: int = None) -> str:
     """
     Generates a specific text section for the equity report using OpenAI Chat API.
     
@@ -91,6 +104,9 @@ def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_na
         company_ticker: Stock ticker
         base_url: Optional API base URL (for proxy services like SiliconFlow)
         model: Optional model name (default: gpt-4o-mini or configured model)
+        reasoning_effort: Optional reasoning budget hint ("none"/"low"/...).
+            Only sent when set, because most providers reject unknown values.
+        max_tokens: Optional output-token budget (default: DEFAULT_MAX_TOKENS)
     """
     
     print(f"🤖 Generating '{prompt_type}' text section...")
@@ -124,27 +140,46 @@ def generate_text_section(data: Dict, prompt_type: str, api_key: str, company_na
     # Prepare user prompt with data
     user_prompt = _prepare_user_prompt(data, prompt_type, company_name, company_ticker)
     
-    # Call OpenAI API
-    try:
-        response = client.chat.completions.create(
-            model=default_model,
-            messages=[
+    # Call the chat-completions endpoint
+    def _request(token_budget: int):
+        kwargs = {
+            "model": default_model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        generated_text = response.choices[0].message.content.strip()
-        
+            "temperature": 0.7,
+            "max_tokens": token_budget
+        }
+        # Only sent when configured: providers differ in which values they accept.
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        return client.chat.completions.create(**kwargs)
+
+    try:
+        budget = max_tokens or DEFAULT_MAX_TOKENS
+        response = _request(budget)
+        choice = response.choices[0]
+        generated_text = (choice.message.content or "").strip()
+
+        # Reasoning models can spend the entire budget on hidden reasoning and
+        # return no answer text at all. Retry once with a bigger budget rather
+        # than silently degrading to the static fallback text.
+        if not generated_text and choice.finish_reason == "length" and budget < MAX_TOKEN_CEILING:
+            retry_budget = MAX_TOKEN_CEILING
+            print(f"🔁 '{prompt_type}': no answer text (finish_reason=length, {budget}-token budget "
+                  f"consumed by reasoning), retrying with {retry_budget}")
+            response = _request(retry_budget)
+            choice = response.choices[0]
+            generated_text = (choice.message.content or "").strip()
+
         if generated_text:
             print(f"✅ Successfully generated '{prompt_type}' ({len(generated_text)} chars)")
             return generated_text
         else:
-            print(f"⚠️ Warning: Empty response for '{prompt_type}'")
+            print(f"⚠️ Warning: Empty response for '{prompt_type}' (finish_reason={choice.finish_reason})")
             return _get_fallback_text(prompt_type, company_name)
-            
+
     except Exception as e:
         print(f"❌ Error generating '{prompt_type}': {e}")
         return _get_fallback_text(prompt_type, company_name)

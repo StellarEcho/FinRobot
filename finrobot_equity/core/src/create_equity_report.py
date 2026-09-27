@@ -47,42 +47,44 @@ def load_credit_cashflow_metrics_from_csv(file_path: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(file_path)
 
-        # Define the mapping from CSV columns to the desired metric names
+        # Each row lists the acceptable CSV columns, newest API name first.
+        # FMP's stable API renamed several of these and dropped others, so a
+        # single missing metric must not discard the whole table.
         metric_mapping = {
-            'debtEquityRatio': 'Debt/Equity',
-            'debtRatio': 'Debt/Assets',
-            'interestCoverage': 'EBITDA/Int Exp',
-            'netProfitMargin': 'Net Margin',
-            'currentRatio': 'Current Ratio',
-            'cashFlowToDebtRatio': 'Cash Flow to Debt Ratio'
+            'Debt/Equity': (['debtEquityRatio', 'debtToEquityRatio'], "{:.2f}"),
+            'Debt/Assets': (['debtRatio', 'debtToAssetsRatio'], "{:.2f}"),
+            'EBITDA/Int Exp': (['interestCoverage', 'interestCoverageRatio'], "{:.1f}x"),
+            'Net Margin': (['netProfitMargin'], "{:.1f}%"),
+            'Current Ratio': (['currentRatio'], "{:.1f}"),
+            'Cash Flow to Debt Ratio': (['cashFlowToDebtRatio'], "{:.2f}"),
         }
 
-        # Check if necessary columns exist
-        if 'calendarYear' not in df.columns or not all(key in df.columns for key in metric_mapping.keys()):
-            print("Warning: The ratios CSV file is missing required columns (e.g., 'calendarYear' or ratio columns).")
+        year_column = next(
+            (c for c in ('calendarYear', 'year', 'fiscalYear') if c in df.columns),
+            None,
+        )
+        if year_column is None:
+            print("Warning: The ratios CSV file has no year column (calendarYear/year/fiscalYear).")
             return pd.DataFrame()
 
-        # Reverse the DataFrame to have the latest year last
-        df = df.sort_values(by='calendarYear').reset_index(drop=True)
+        df = df.sort_values(by=year_column).reset_index(drop=True)
 
-        # Initialize the dictionary to hold the formatted data
-        credit_metrics_data = {'metrics': list(metric_mapping.values())}
-
-        year_cols = sorted(df['calendarYear'].unique())
-
-        for year in year_cols:
-            year_str = f"{year}A" # Append 'A' to match existing format
-            credit_metrics_data[year_str] = []
-            year_data = df[df['calendarYear'] == year].iloc[0]
-
-            # Populate the data for the year based on the mapping
-            credit_metrics_data[year_str].append(f"{year_data['debtEquityRatio']:.2f}" if pd.notna(year_data['debtEquityRatio']) else "N/A")
-            credit_metrics_data[year_str].append(f"{year_data['debtRatio']:.2f}" if pd.notna(year_data['debtRatio']) else "N/A")
-            credit_metrics_data[year_str].append(f"{year_data['interestCoverage']:.1f}x" if pd.notna(year_data['interestCoverage']) else "N/A")
-            credit_metrics_data[year_str].append(f"{year_data['netProfitMargin']*100:.1f}%" if pd.notna(year_data['netProfitMargin']) else "N/A")
-            credit_metrics_data[year_str].append(f"{year_data['currentRatio']:.1f}" if pd.notna(year_data['currentRatio']) else "N/A")
-            credit_metrics_data[year_str].append(f"{year_data['cashFlowToDebtRatio']:.2f}" if pd.notna(year_data['cashFlowToDebtRatio']) else "N/A")
-
+        credit_metrics_data = {'metrics': list(metric_mapping.keys())}
+        for year in sorted(df[year_column].dropna().unique()):
+            year_data = df[df[year_column] == year].iloc[0]
+            row = []
+            for candidates, number_format in metric_mapping.values():
+                value = next(
+                    (year_data[c] for c in candidates if c in df.columns and pd.notna(year_data[c])),
+                    None,
+                )
+                if value is None:
+                    row.append("N/A")
+                elif number_format.endswith("}%"):
+                    row.append(number_format.format(value * 100))
+                else:
+                    row.append(number_format.format(value))
+            credit_metrics_data[f"{int(year)}A"] = row
 
         return pd.DataFrame(credit_metrics_data)
 
@@ -192,7 +194,9 @@ def validate_and_fix_text_content(text_content: str, text_type: str, company_nam
 
 def regenerate_text_if_needed(text_content: str, text_type: str, company_name: str, company_ticker: str, 
                              analysis_df: pd.DataFrame, peer_ebitda_df: pd.DataFrame, 
-                             peer_ev_ebitda_df: pd.DataFrame, api_key: str = None) -> str:
+                             peer_ev_ebitda_df: pd.DataFrame, api_key: str = None,
+                             base_url: str = None, model: str = None,
+                             reasoning_effort: str = None) -> str:
     """Generate text content using AI, calling the single unified function."""
     
     # This function now handles all text types through the same logic if regeneration is enabled.
@@ -212,7 +216,10 @@ def regenerate_text_if_needed(text_content: str, text_type: str, company_name: s
                 text_type, 
                 api_key, 
                 company_name, 
-                company_ticker
+                company_ticker,
+                base_url=base_url,
+                model=model,
+                reasoning_effort=reasoning_effort
             )
             
             # Basic validation of the generated content
@@ -231,7 +238,8 @@ def regenerate_text_if_needed(text_content: str, text_type: str, company_name: s
     return validate_and_fix_text_content(text_content, text_type, company_name, company_ticker)
 
 
-def process_text_content(args, analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key):
+def process_text_content(args, analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key,
+                         openai_base_url=None, openai_model=None, openai_reasoning_effort=None):
     """Process all text content with enhanced AI generation for competitor analysis and takeaways."""
     
     print("📖 Loading and processing text content...")
@@ -270,7 +278,9 @@ def process_text_content(args, analysis_df, peer_ebitda_df, peer_ev_ebitda_df, o
                 print(f"⚠️ Detected CSV data in {text_type}, forcing AI regeneration...")
                 processed_texts[text_type] = regenerate_text_if_needed(
                     raw_content or "", text_type, args.company_name, args.company_ticker,
-                    analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key
+                    analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key,
+                    base_url=openai_base_url, model=openai_model,
+                    reasoning_effort=openai_reasoning_effort
                 )
             # If no API key, provide a fallback
             elif is_csv_data:
@@ -284,7 +294,9 @@ def process_text_content(args, analysis_df, peer_ebitda_df, peer_ev_ebitda_df, o
                 if args.enable_text_regeneration and openai_api_key:
                     processed_texts[text_type] = regenerate_text_if_needed(
                         raw_content or "", text_type, args.company_name, args.company_ticker,
-                        analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key
+                        analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key,
+                        base_url=openai_base_url, model=openai_model,
+                        reasoning_effort=openai_reasoning_effort
                     )
                 else:
                     processed_texts[text_type] = validate_and_fix_text_content(
@@ -295,7 +307,9 @@ def process_text_content(args, analysis_df, peer_ebitda_df, peer_ev_ebitda_df, o
             if args.enable_text_regeneration and openai_api_key:
                 processed_texts[text_type] = regenerate_text_if_needed(
                     raw_content or "", text_type, args.company_name, args.company_ticker,
-                    analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key
+                    analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key,
+                    base_url=openai_base_url, model=openai_model,
+                    reasoning_effort=openai_reasoning_effort
                 )
             else:
                 processed_texts[text_type] = validate_and_fix_text_content(
@@ -380,6 +394,9 @@ def main():
 
     # --- Load configuration and API key ---
     openai_api_key = None
+    openai_base_url = None
+    openai_model = None
+    openai_reasoning_effort = None
     try:
         config = load_config(args.config_file)
         fmp_api_key = get_api_key(config, "API_KEYS", "fmp_api_key")
@@ -387,6 +404,18 @@ def main():
             try:
                 openai_api_key = get_api_key(config, "API_KEYS", "openai_api_key")
                 print("✅ OpenAI API key loaded for text regeneration")
+                # Honor a custom endpoint/model so proxy services and
+                # OpenAI-compatible providers (DeepSeek, SiliconFlow, ...) are
+                # used consistently. Falls back to the OpenAI default when unset.
+                openai_base_url = config.get("API_KEYS", "openai_base_url", fallback=None) or None
+                openai_model = config.get("API_KEYS", "openai_model", fallback=None) or None
+                openai_reasoning_effort = config.get("API_KEYS", "openai_reasoning_effort", fallback=None) or None
+                if openai_base_url:
+                    print(f"📡 Using API base URL: {openai_base_url}")
+                if openai_model:
+                    print(f"🤖 Using model: {openai_model}")
+                if openai_reasoning_effort:
+                    print(f"🧠 Using reasoning effort: {openai_reasoning_effort}")
             except Exception as e:
                 print(f"⚠️ Warning: OpenAI API key not available: {e}")
                 print("Text regeneration will be disabled")
@@ -465,7 +494,11 @@ def main():
     peer_ev_ebitda_df = load_analysis_csv(args.peer_ev_ebitda_csv) if args.peer_ev_ebitda_csv else pd.DataFrame()
 
     # Process text content with AI enhancement
-    processed_texts = process_text_content(args, analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key)
+    processed_texts = process_text_content(
+        args, analysis_df, peer_ebitda_df, peer_ev_ebitda_df, openai_api_key,
+        openai_base_url=openai_base_url, openai_model=openai_model,
+        openai_reasoning_effort=openai_reasoning_effort
+    )
     
     # Fix stale dates in cached text (e.g. "June 2024" → actual report date)
     import re as _re
