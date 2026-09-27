@@ -86,11 +86,14 @@ def main():
     parser.add_argument("--enable-enhanced-news", action="store_true", help="Enable enhanced news integration with categorization")
 
     # Forecast Configuration
-    parser.add_argument("--revenue-growth-2025", type=float, default=0.05, help="Revenue growth assumption for 2025E (default: 5%)")
-    parser.add_argument("--revenue-growth-2026", type=float, default=0.06, help="Revenue growth assumption for 2026E (default: 6%)")
-    parser.add_argument("--revenue-growth-2027", type=float, default=0.04, help="Revenue growth assumption for 2027E (default: 4%)")
-    parser.add_argument("--margin-improvement", type=float, default=0.01, help="Annual margin improvement assumption (default: 1%)")
-    parser.add_argument("--sga-margin-improvement", type=float, default=-0.005, help="SG&A margin change assumption (default: -0.5% efficiency gain)")
+    # NOTE: argparse runs help strings through %-formatting, so literal percent
+    # signs must be escaped as %% or --help crashes with "unsupported format
+    # character".
+    parser.add_argument("--revenue-growth-2025", type=float, default=0.05, help="Revenue growth assumption for 2025E (default: 5%%)")
+    parser.add_argument("--revenue-growth-2026", type=float, default=0.06, help="Revenue growth assumption for 2026E (default: 6%%)")
+    parser.add_argument("--revenue-growth-2027", type=float, default=0.04, help="Revenue growth assumption for 2027E (default: 4%%)")
+    parser.add_argument("--margin-improvement", type=float, default=0.01, help="Annual margin improvement assumption (default: 1%%)")
+    parser.add_argument("--sga-margin-improvement", type=float, default=-0.005, help="SG&A margin change assumption (default: -0.5%% efficiency gain)")
 
     # API Options
     parser.add_argument("--period", type=str, default="annual", choices=["annual", "quarterly"], help="Data period (annual or quarterly)")
